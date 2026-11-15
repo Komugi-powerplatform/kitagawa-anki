@@ -1,7 +1,7 @@
 import { newId, type AppData, type CardRec } from '../domain/card'
 import { buildQueue, countsForDeck, nextLearningDue } from '../domain/queue'
 import { formatInterval, GRADES, Rating, type Grade, type Scheduler } from '../domain/scheduler'
-import { exportJson, importJson } from '../storage/backup'
+import { exportJson, importJson, removeCard } from '../storage/backup'
 import type { Repo } from '../storage/repo'
 import { h } from './dom'
 
@@ -35,7 +35,14 @@ export class App {
   private data: AppData
   private settings = loadSettings()
   private screen: Screen = { name: 'home' }
-  private revealed = false
+  /** 答えを表示しているカードの ID。カードが変わったら自動で問題側に戻るよう、真偽値でなく ID で持つ */
+  private revealedId: string | null = null
+  /** 取り消し用。答える前のカードと、その時点の回答記録の件数 */
+  private undoStack: { card: CardRec; logsLen: number }[] = []
+  /** 取り消した直後は、そのカードをもう一度出す */
+  private forcedCardId: string | null = null
+  /** バックアップで置き換える前の確認待ち */
+  private pendingReplace: AppData | null = null
   private flash: { text: string; kind: 'ok' | 'error' } | null = null
 
   constructor(
@@ -56,14 +63,22 @@ export class App {
 
   private go(screen: Screen): void {
     this.screen = screen
-    this.revealed = false
+    this.revealedId = null
+    this.pendingReplace = null
     this.render()
     window.scrollTo(0, 0)
   }
 
-  private commit(data: AppData): void {
+  /** 保存できたときだけ画面のデータを差し替える。容量オーバーなどで失敗したら知らせて、元のままにする */
+  private commit(data: AppData): boolean {
+    try {
+      this.repo.save(data)
+    } catch (e) {
+      this.say(`保存できませんでした（${e instanceof Error ? e.name : '不明なエラー'}）。設定からバックアップを書き出してください。`, 'error')
+      return false
+    }
     this.data = data
-    this.repo.save(data)
+    return true
   }
 
   private say(text: string, kind: 'ok' | 'error' = 'ok'): void {
@@ -137,6 +152,10 @@ export class App {
   private currentCard(deckId?: string): CardRec | null {
     const now = this.now()
     const opts = { newPerDay: this.settings.newPerDay, deckId }
+    if (this.forcedCardId) {
+      const forced = this.data.cards.find((c) => c.id === this.forcedCardId && (!deckId || c.deckId === deckId))
+      if (forced) return forced
+    }
     const q = buildQueue(this.data.cards, this.data.logs, now, opts)
     if (q.length) return q[0]
     const ahead = buildQueue(this.data.cards, this.data.logs, new Date(now.getTime() + LEARN_AHEAD_MS), { ...opts, newPerDay: 0 })
@@ -146,7 +165,7 @@ export class App {
   private review(deckId?: string): HTMLElement {
     const deckName = deckId ? this.data.decks.find((d) => d.id === deckId)?.name : 'すべてのデッキ'
     const card = this.currentCard(deckId)
-    const header = h('header', { class: 'review-head' }, h('button', { class: 'back', onclick: () => this.go({ name: 'home' }) }, '‹ 戻る'), h('span', {}, deckName ?? ''), this.counts(countsForDeck(this.data.cards, this.data.logs, this.now(), { newPerDay: this.settings.newPerDay, deckId })))
+    const header = h('header', { class: 'review-head' }, h('button', { class: 'back', onclick: () => this.go({ name: 'home' }) }, '‹ 戻る'), h('span', {}, deckName ?? ''), this.undoStack.length > 0 && h('button', { class: 'undo', onclick: () => this.undo() }, '↶ 取り消す'), this.counts(countsForDeck(this.data.cards, this.data.logs, this.now(), { newPerDay: this.settings.newPerDay, deckId })))
 
     if (!card) {
       const next = nextLearningDue(this.data.cards, this.now(), deckId)
@@ -159,8 +178,13 @@ export class App {
     }
 
     const now = this.now()
-    const face = h('div', { class: 'card-face' }, h('div', { class: 'front' }, card.front), this.revealed && h('hr', {}), this.revealed && h('div', { class: 'back-text' }, card.back))
-    const actions = this.revealed
+    const revealed = this.revealedId === card.id
+    const reveal = () => {
+      this.revealedId = card.id
+      this.render()
+    }
+    const face = h('div', { class: 'card-face', onclick: revealed ? undefined : reveal }, h('div', { class: 'front' }, card.front), revealed && h('hr', {}), revealed && h('div', { class: 'back-text' }, card.back))
+    const actions = revealed
       ? h(
           'div',
           { class: 'grades' },
@@ -168,19 +192,45 @@ export class App {
             h('button', { class: `grade grade-${p.rating}`, onclick: () => this.answer(card, p.rating) }, h('span', { class: 'grade-time' }, formatInterval(p.dueAt.getTime() - now.getTime())), h('span', { class: 'grade-label' }, GRADE_LABEL[p.rating])),
           ),
         )
-      : h('div', { class: 'grades' }, h('button', { class: 'primary big reveal', onclick: () => ((this.revealed = true), this.render()) }, '答えを見る'))
+      : h('div', { class: 'grades' }, h('button', { class: 'primary big reveal', onclick: reveal }, '答えを見る'))
     return h('section', {}, header, face, actions)
   }
 
   private answer(card: CardRec, rating: Grade): void {
     if (!GRADES.includes(rating)) return
     const r = this.scheduler.review(card.sched, rating, this.now())
-    this.commit({
+    const saved = this.commit({
       ...this.data,
       cards: this.data.cards.map((c) => (c.id === card.id ? { ...c, sched: r.sched } : c)),
       logs: [...this.data.logs, { cardId: card.id, ...r.log }],
     })
-    this.revealed = false
+    if (saved) {
+      this.undoStack = [...this.undoStack.slice(-49), { card, logsLen: this.data.logs.length - 1 }]
+      this.forcedCardId = null
+      this.revealedId = null
+    }
+    this.render()
+  }
+
+  private undo(): void {
+    const last = this.undoStack.at(-1)
+    if (!last) return
+    if (!this.data.cards.some((c) => c.id === last.card.id)) {
+      this.undoStack = this.undoStack.slice(0, -1)
+      this.render()
+      return
+    }
+    const saved = this.commit({
+      ...this.data,
+      cards: this.data.cards.map((c) => (c.id === last.card.id ? last.card : c)),
+      logs: this.data.logs.slice(0, last.logsLen),
+    })
+    if (saved) {
+      this.undoStack = this.undoStack.slice(0, -1)
+      this.forcedCardId = last.card.id
+      this.revealedId = null
+      this.say(`「${last.card.front}」の答えを取り消しました。`)
+    }
     this.render()
   }
 
@@ -230,8 +280,7 @@ export class App {
         btn.textContent = 'もう一度押すと削除'
         return
       }
-      this.commit({ ...this.data, cards: this.data.cards.filter((c) => c.id !== card.id), logs: this.data.logs.filter((l) => l.cardId !== card.id) })
-      this.say('カードを削除しました。')
+      if (this.commit(removeCard(this.data, card.id))) this.say('カードを削除しました。')
       this.go({ name: 'cards' })
     })
     return btn
@@ -255,7 +304,10 @@ export class App {
       ? this.data.cards.map((c) => (c.id === editing.id ? { ...c, deckId: deck.id, front, back } : c))
       : [...this.data.cards, { id: newId(), deckId: deck.id, front, back, createdAt: now.toISOString(), sched: this.scheduler.newSched(now) }]
     const used = new Set(cards.map((c) => c.deckId))
-    this.commit({ ...this.data, decks: decks.filter((d) => used.has(d.id)), cards })
+    if (!this.commit({ ...this.data, decks: decks.filter((d) => used.has(d.id)), cards })) {
+      this.render()
+      return
+    }
     this.say(editing ? '保存しました。' : `「${front}」を追加しました。`)
     this.go({ name: 'cards' })
   }
@@ -267,11 +319,13 @@ export class App {
       const f = file.files?.[0]
       if (!f) return
       const r = importJson(await f.text(), this.data, this.scheduler, this.now())
+      file.value = ''
       if (!r.ok) {
         this.say(r.error, 'error')
-      } else {
-        this.commit(r.data)
-        this.say(`${r.added}枚を取り込みました。`)
+      } else if (r.kind === 'replace') {
+        this.pendingReplace = r.data
+      } else if (this.commit(r.data)) {
+        this.say(r.added === 0 ? '新しいカードはありませんでした（すべて取り込み済みです）。' : `${r.added}枚を取り込みました。`)
       }
       this.render()
     })
@@ -289,10 +343,33 @@ export class App {
       'section',
       {},
       h('h1', {}, '設定'),
+      this.pendingReplace && this.replaceConfirm(this.pendingReplace),
       h('div', { class: 'panel' }, h('h2', {}, '取り込み'), h('p', { class: 'hint' }, 'Anki から書き出したカード（.json）か、このアプリのバックアップを選びます。バックアップを選ぶと、今のデータは置き換わります。'), h('label', { class: 'primary file-label' }, 'ファイルを選ぶ', file)),
       h('div', { class: 'panel' }, h('h2', {}, 'バックアップ'), h('p', { class: 'hint' }, '復習の記録ごと .json に書き出します。機種変更やデータが消えたときに使います。'), h('button', { class: 'primary', onclick: () => this.exportBackup() }, '書き出す')),
       h('div', { class: 'panel' }, h('h2', {}, '学習'), h('label', {}, '1日の新規カード（枚）', newPerDay)),
       h('p', { class: 'credit' }, `出題の計算: ts-fsrs（FSRS-6, MIT License）／ データはこの端末の中だけに保存されます。カード ${this.data.cards.length}枚・復習記録 ${this.data.logs.length}件`),
+    )
+  }
+
+  private replaceConfirm(next: AppData): HTMLElement {
+    return h(
+      'div',
+      { class: 'panel confirm', role: 'alertdialog' },
+      h('h2', {}, 'バックアップで置き換えますか？'),
+      h('p', {}, `今のデータ（カード ${this.data.cards.length}枚・復習記録 ${this.data.logs.length}件）は消え、バックアップの内容（カード ${next.cards.length}枚・復習記録 ${next.logs.length}件）に置き換わります。`),
+      h(
+        'div',
+        { class: 'row' },
+        h('button', { class: 'danger', onclick: () => {
+          this.pendingReplace = null
+          if (this.commit(next)) {
+            this.undoStack = []
+            this.say(`バックアップから復元しました（カード ${next.cards.length}枚）。`)
+          }
+          this.render()
+        } }, '置き換える'),
+        h('button', { class: 'ghost', onclick: () => ((this.pendingReplace = null), this.render()) }, 'やめる'),
+      ),
     )
   }
 

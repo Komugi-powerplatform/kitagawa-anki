@@ -20,8 +20,12 @@ function newIntroducedToday(logs: LogRec[], now: Date): number {
   return logs.filter((l) => l.wasNew && new Date(l.at).getTime() >= start).length
 }
 
+/** 学習中・再学習中は時刻で、復習カードは日単位で判定する（期日の日になれば朝4時から出す。Anki と同じ） */
 function isDue(c: CardRec, now: Date): boolean {
-  return c.sched.reps > 0 && new Date(c.sched.dueAt).getTime() <= now.getTime()
+  if (c.sched.reps === 0) return false
+  const due = new Date(c.sched.dueAt).getTime()
+  if (c.sched.state === State.Review) return due < dayStart(now).getTime() + 24 * 3_600_000
+  return due <= now.getTime()
 }
 
 function byDue(a: CardRec, b: CardRec): number {

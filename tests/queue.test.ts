@@ -61,6 +61,27 @@ describe('buildQueue', () => {
   })
 })
 
+describe('復習カードは日単位で出す（Anki と同じ）', () => {
+  it('期日の日になれば、期日の時刻より前でも朝4時から出る', () => {
+    // 期日 2026-11-21 21:00 JST の復習カードを、当日 08:00 JST に開く
+    const c = card('rev', { reps: 3, state: 2, dueAt: '2026-11-21T12:00:00Z' })
+    const morning = new Date('2026-11-20T23:00:00Z')
+    expect(buildQueue([c], [], morning, { newPerDay: 20 }).map((x) => x.id)).toEqual(['rev'])
+    expect(countsForDeck([c], [], morning, { newPerDay: 20 }).review).toBe(1)
+  })
+
+  it('期日の前日には出ない', () => {
+    const c = card('rev', { reps: 3, state: 2, dueAt: '2026-11-21T12:00:00Z' })
+    const dayBefore = new Date('2026-11-20T12:00:00Z') // 11-20 21:00 JST
+    expect(buildQueue([c], [], dayBefore, { newPerDay: 20 })).toEqual([])
+  })
+
+  it('学習中カードは今まで通り時刻で出す', () => {
+    const c = card('learn', { reps: 1, state: 1, dueAt: '2026-11-15T03:10:00Z' })
+    expect(buildQueue([c], [], NOW, { newPerDay: 20 })).toEqual([])
+  })
+})
+
 describe('countsForDeck', () => {
   it('新規・学習中・復習の残り枚数を数える', () => {
     const cards = [

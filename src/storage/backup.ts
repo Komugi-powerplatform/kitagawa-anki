@@ -36,7 +36,7 @@ export function exportJson(data: AppData): string {
   return JSON.stringify(data, null, 2)
 }
 
-export type ImportResult = { ok: true; data: AppData; added: number } | { ok: false; error: string }
+export type ImportResult = { ok: true; data: AppData; added: number; kind: 'replace' | 'merge' } | { ok: false; error: string }
 
 /**
  * 取り込み。2種類を受け付ける。
@@ -51,7 +51,7 @@ export function importJson(text: string, current: AppData, scheduler: Scheduler,
     return { ok: false, error: 'JSON として読めないファイルです。' }
   }
 
-  if (isAppData(parsed)) return { ok: true, data: parsed, added: parsed.cards.length }
+  if (isAppData(parsed)) return { ok: true, data: parsed, added: parsed.cards.length, kind: 'replace' }
   if (!isSeed(parsed)) return { ok: false, error: 'KitagawaAnki のバックアップでも、Anki から書き出したカードでもありません。' }
 
   const bad = parsed.cards.findIndex(
@@ -82,5 +82,12 @@ export function importJson(text: string, current: AppData, scheduler: Scheduler,
     added++
   })
 
-  return { ok: true, data: { ...current, decks, cards }, added }
+  return { ok: true, data: { ...current, decks, cards }, added, kind: 'merge' }
+}
+
+/** カードを消す。回答記録は残す（消すとその日の新規枠が戻ってしまうため）。カードが無くなったデッキは消す */
+export function removeCard(data: AppData, cardId: string): AppData {
+  const cards = data.cards.filter((c) => c.id !== cardId)
+  const used = new Set(cards.map((c) => c.deckId))
+  return { ...data, cards, decks: data.decks.filter((d) => used.has(d.id)) }
 }

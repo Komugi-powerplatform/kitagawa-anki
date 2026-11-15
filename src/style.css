@@ -96,6 +96,12 @@ button:disabled { opacity: 0.5; cursor: default; }
 .review-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 16px; }
 .review-head > span:not(.counts) { color: var(--muted); font-size: 0.9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .back { border: none; background: none; padding: 8px 0; color: var(--accent); }
+.undo { padding: 6px 10px; font-size: 0.85rem; color: var(--accent); }
+/* 回答ボタン帯（下から 64px＋高さ約 100px）に答えの最後が隠れないよう、復習画面だけ下の余白を広げる */
+.screen-review { padding-bottom: calc(env(safe-area-inset-bottom) + 190px); }
+.card-face { cursor: pointer; }
+.confirm { border-color: var(--danger); }
+.confirm p { margin: 0; }
 .card-face {
   background: var(--surface);
   border: 1px solid var(--line);

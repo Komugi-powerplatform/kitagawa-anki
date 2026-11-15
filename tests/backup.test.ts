@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { emptyData, exportJson, importJson } from '../src/storage/backup'
+import { emptyData, exportJson, importJson, removeCard } from '../src/storage/backup'
 import { MemoryRepo } from '../src/storage/repo'
 import { createScheduler } from '../src/domain/scheduler'
 
@@ -44,6 +44,8 @@ describe('importJson（バックアップの復元）', () => {
     const restored = importJson(exportJson(withLog), emptyData(), s, NOW)
     if (!restored.ok) throw new Error(restored.error)
     expect(restored.data).toEqual(withLog)
+    expect(restored.kind).toBe('replace')
+    expect(r.kind).toBe('merge')
   })
 })
 
@@ -56,6 +58,20 @@ describe('importJson（壊れたファイル）', () => {
     const s = await createScheduler()
     const r = importJson(text, emptyData(), s, NOW)
     expect(r.ok).toBe(false)
+  })
+})
+
+describe('removeCard', () => {
+  it('カードを消しても回答記録は残す（その日の新規枠が戻らないように）。空になったデッキは消す', async () => {
+    const s = await createScheduler()
+    const r = importJson(seed, emptyData(), s, NOW)
+    if (!r.ok) throw new Error(r.error)
+    const groom = r.data.cards.find((c) => c.front === 'groom')!
+    const data = { ...r.data, logs: [{ cardId: groom.id, at: NOW.toISOString(), rating: 3, wasNew: true }] }
+    const after = removeCard(data, groom.id)
+    expect(after.cards).toHaveLength(2)
+    expect(after.logs).toHaveLength(1)
+    expect(after.decks.map((d) => d.name)).toEqual(['English'])
   })
 })
 
