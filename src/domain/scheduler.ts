@@ -13,7 +13,7 @@ export interface PreviewItem {
 
 export interface ReviewResult {
   sched: Sched
-  log: { at: string; rating: Grade; wasNew: boolean }
+  log: { at: string; rating: Grade; wasNew: boolean; prevState: number }
 }
 
 export interface Scheduler {
@@ -74,7 +74,7 @@ export async function createScheduler(): Promise<Scheduler> {
       const r = f.review({ card: toFsrsCard(sched), grade: rating, now })
       return {
         sched: fromFsrsCard(r.card),
-        log: { at: now.toISOString(), rating, wasNew: sched.reps === 0 },
+        log: { at: now.toISOString(), rating, wasNew: sched.reps === 0, prevState: sched.state },
       }
     },
   }

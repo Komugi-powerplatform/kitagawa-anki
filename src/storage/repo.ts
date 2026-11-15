@@ -1,12 +1,16 @@
 import type { AppData } from '../domain/card'
-import { emptyData, isAppData } from './backup'
+import { emptyData } from './backup'
+import { migrate } from './migrate'
 
 export interface Repo {
   load(): AppData
   save(data: AppData): void
 }
 
+/** 保存先のキー（名前は第1弾のまま。中身は version 2） */
 export const STORAGE_KEY = 'kitagawa-anki:v1'
+/** 第1弾の形から移行したとき、移行前のデータを1世代だけ残しておくキー */
+export const PRE_MIGRATION_KEY = 'kitagawa-anki:before-v2'
 
 /** 端末のブラウザに保存する（iPhone ではホーム画面に追加したアプリ内に残る） */
 export class LocalStorageRepo implements Repo {
@@ -14,8 +18,18 @@ export class LocalStorageRepo implements Repo {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return emptyData()
     const parsed: unknown = JSON.parse(raw)
-    if (!isAppData(parsed)) throw new Error('保存データの形式が読めません。バックアップから取り込み直してください。')
-    return parsed
+    const data = migrate(parsed)
+    if (!data) throw new Error('保存データの形式が読めません。バックアップから取り込み直してください。')
+    if ((parsed as { version?: number }).version !== data.version) {
+      // 移行に成功したときだけ、移行前を残してから新しい形で保存する
+      try {
+        localStorage.setItem(PRE_MIGRATION_KEY, raw)
+        this.save(data)
+      } catch {
+        // 容量不足などで保存できなくても、読み込んだデータでそのまま使える（次の保存時に再挑戦）
+      }
+    }
+    return data
   }
   save(data: AppData): void {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(data))
