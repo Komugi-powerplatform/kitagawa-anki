@@ -44,6 +44,8 @@ export interface CardRec {
   buried?: string
   /** 停止: 再開するまで出さない */
   suspended?: boolean
+  /** リーチ: 8回以上忘れて自動で止めたことがある */
+  leech?: boolean
 }
 
 export interface LogRec {

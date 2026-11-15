@@ -1,4 +1,5 @@
 import { newId, type AppData, type CardRec, type Deck, type Note, type NoteType } from '../domain/card'
+import { applyLeech, LEECH_THRESHOLD } from '../domain/leech'
 import { renderCard, syncCards, validateNote, type Seg } from '../domain/note'
 import { buildQueue, countsForDeck, nextDayStart, nextLearningDue, type Limits } from '../domain/queue'
 import { formatInterval, GRADES, Rating, type Grade, type Scheduler } from '../domain/scheduler'
@@ -30,7 +31,7 @@ const GRADE_LABEL: Record<Grade, string> = {
 
 const TYPE_LABEL: Record<NoteType, string> = { basic: '基本', reverse: '基本（逆向きも）', cloze: '穴埋め' }
 
-type StatusFilter = 'all' | 'new' | 'buried' | 'suspended'
+type StatusFilter = 'all' | 'new' | 'buried' | 'suspended' | 'leech'
 
 function readLimit(v: unknown, fallback: number): number {
   return Number.isInteger(v) && (v as number) >= 0 ? (v as number) : fallback
@@ -127,13 +128,20 @@ export class App {
 
   render(): void {
     const s = this.screen
-    const body =
-      s.name === 'home' ? this.home()
-      : s.name === 'review' ? this.review(s.deckId)
-      : s.name === 'cards' ? this.cards()
-      : s.name === 'note' ? this.noteEditor(s.noteId, s.returnTo)
-      : s.name === 'deck' ? this.deckScreen(s.deckId)
-      : this.settingsScreen()
+    let body: HTMLElement
+    try {
+      body =
+        s.name === 'home' ? this.home()
+        : s.name === 'review' ? this.review(s.deckId)
+        : s.name === 'cards' ? this.cards()
+        : s.name === 'note' ? this.noteEditor(s.noteId, s.returnTo)
+        : s.name === 'deck' ? this.deckScreen(s.deckId)
+        : this.settingsScreen()
+    } catch (e) {
+      // 画面が黙って止まらないよう、原因を出して戻れるようにする
+      console.error(e)
+      body = h('div', { class: 'panel confirm', role: 'alert' }, h('h2', {}, 'この画面を表示できませんでした'), h('p', {}, e instanceof Error ? e.message : String(e)), h('p', { class: 'hint' }, 'データは保存されたままです。設定からバックアップを書き出しておくと安心です。'), h('button', { class: 'primary', onclick: () => this.go({ name: 'home' }) }, 'ホームへ'))
+    }
     const flash = this.flash
     this.flash = null
     this.root.replaceChildren(
@@ -284,7 +292,9 @@ export class App {
   private answer(card: CardRec, rating: Grade): void {
     if (!GRADES.includes(rating)) return
     const r = this.scheduler.review(card.sched, rating, this.now())
-    this.changeCards([card], [{ ...card, sched: r.sched }], { logs: [...this.data.logs, { cardId: card.id, deckId: card.deckId, ...r.log }] }, '答え')
+    const leech = applyLeech(card, { ...card, sched: r.sched })
+    const saved = this.changeCards([card], [leech.card], { logs: [...this.data.logs, { cardId: card.id, deckId: card.deckId, ...r.log }] }, '答え')
+    if (saved && leech.leeched) this.say(`このカードは${leech.card.sched.lapses}回忘れたので停止しました（リーチ）。書き方を見直してから、カード画面で再開できます。`, 'error')
     this.render()
   }
 
@@ -321,7 +331,7 @@ export class App {
   // ---------- カード一覧 ----------
   private cardStatus(cards: CardRec[]): string {
     const now = this.now()
-    if (cards.length && cards.every((c) => c.suspended)) return '停止中'
+    if (cards.length && cards.every((c) => c.suspended)) return cards.some((c) => c.leech) ? '停止中（リーチ）' : '停止中'
     if (cards.some((c) => c.buried && new Date(c.buried) > now)) return '保留中'
     if (cards.every((c) => c.sched.reps === 0)) return '新規'
     const next = Math.min(...cards.filter((c) => c.sched.reps > 0 && !c.suspended).map((c) => new Date(c.sched.dueAt).getTime()))
@@ -335,6 +345,7 @@ export class App {
     if (f.status === 'new' && !cards.some((c) => c.sched.reps === 0 && !c.suspended)) return false
     if (f.status === 'buried' && !cards.some((c) => c.buried && new Date(c.buried) > now)) return false
     if (f.status === 'suspended' && !cards.some((c) => c.suspended)) return false
+    if (f.status === 'leech' && !cards.some((c) => c.leech)) return false
     const q = f.q.trim().toLowerCase()
     return !q || `${note.front}\n${note.back}`.toLowerCase().includes(q)
   }
@@ -387,7 +398,7 @@ export class App {
       this.filter = { ...this.filter, deckId: deckSel.value }
       refresh()
     })
-    const statusOpts: [StatusFilter, string][] = [['all', 'すべて'], ['new', '新規'], ['buried', '保留中'], ['suspended', '停止中']]
+    const statusOpts: [StatusFilter, string][] = [['all', 'すべて'], ['new', '新規'], ['buried', '保留中'], ['suspended', '停止中'], ['leech', `リーチ（${LEECH_THRESHOLD}回以上忘れた）`]]
     const statusSel = h('select', { 'aria-label': '状態で絞り込む' }, ...statusOpts.map(([v, label]) => h('option', { value: v, selected: this.filter.status === v }, label)))
     statusSel.addEventListener('change', () => {
       this.filter = { ...this.filter, status: statusSel.value as StatusFilter }
@@ -483,7 +494,7 @@ export class App {
             'li',
             {},
             h('span', { class: 'cs-label' }, label(c)),
-            h('span', { class: 'cs-status' }, c.suspended ? '停止中' : buried ? '保留中' : c.sched.reps === 0 ? '新規' : `次回 ${new Date(c.sched.dueAt).toLocaleDateString('ja-JP')}`),
+            h('span', { class: 'cs-status' }, c.suspended ? (c.leech ? `停止中（リーチ・${c.sched.lapses}回忘れた）` : '停止中') : buried ? '保留中' : c.sched.reps === 0 ? '新規' : `次回 ${new Date(c.sched.dueAt).toLocaleDateString('ja-JP')}`),
             c.suspended
               ? h('button', { type: 'button', class: 'ghost small', onclick: () => update(c, { suspended: undefined }, `${label(c)}を再開しました。`) }, '再開')
               : h('button', { type: 'button', class: 'ghost small', onclick: () => update(c, { suspended: true }, `${label(c)}を停止しました。`) }, '停止'),
