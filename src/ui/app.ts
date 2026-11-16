@@ -21,6 +21,8 @@ const LAST_TYPE_KEY = 'kitagawa-anki:lastType'
 /** 学習中カードは、ほかに出すものが無ければ20分先までは前倒しで出す（Anki の初期設定と同じ） */
 const LEARN_AHEAD_MS = 20 * 60_000
 const DEFAULT_LIMITS: Limits = { newPerDay: 20, reviewPerDay: 200 }
+/** 答えを出した直後は、この時間だけ答えのボタンを受け付けない（「答えを見る」の2度押しで答えてしまうのを防ぐ） */
+export const GRADE_GUARD_MS = 350
 
 const GRADE_LABEL: Record<Grade, string> = {
   [Rating.Again]: 'もう一度',
@@ -67,6 +69,8 @@ export class App {
   /** 取り消し・編集の直後は、そのカードをもう一度出す */
   private forcedCardId: string | null = null
   private menuOpen = false
+  /** 答えを出した時刻（performance.now） */
+  private revealedAt = 0
   /** バックアップで置き換える前の確認待ち */
   private pendingReplace: AppData | null = null
   private filter: { q: string; deckId: string; status: StatusFilter } = { q: '', deckId: '', status: 'all' }
@@ -261,8 +265,13 @@ export class App {
     const revealed = this.revealedId === card.id
     const reveal = () => {
       this.revealedId = card.id
+      this.revealedAt = performance.now()
       this.menuOpen = false
       this.render()
+      // 受け付けない間はボタンを薄くして、まだ押せないことを見せる
+      const bar = this.root.querySelector('.grades')
+      bar?.classList.add('arming')
+      setTimeout(() => bar?.classList.remove('arming'), GRADE_GUARD_MS)
     }
 
     const menu =
@@ -311,6 +320,7 @@ export class App {
 
   private answer(card: CardRec, rating: Grade): void {
     if (!GRADES.includes(rating)) return
+    if (performance.now() - this.revealedAt < GRADE_GUARD_MS) return
     const r = this.scheduler.review(card.sched, rating, this.now())
     const leech = applyLeech(card, { ...card, sched: r.sched })
     const saved = this.changeCards([card], [leech.card], { logs: [...this.data.logs, { cardId: card.id, deckId: card.deckId, ...r.log }] }, '答え')

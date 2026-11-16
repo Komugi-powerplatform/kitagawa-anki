@@ -207,3 +207,6 @@ select { font: inherit; font-size: 16px; color: var(--text); background: var(--s
 .cs-status { color: var(--muted); font-size: 0.9rem; flex: 1; }
 [hidden] { display: none !important; }
 .deck { padding: 0; border: none; background: none; grid-template-areas: none; }
+
+/* 答えを出した直後の、まだ押せない間 */
+.grades.arming .grade { opacity: 0.4; pointer-events: none; }
