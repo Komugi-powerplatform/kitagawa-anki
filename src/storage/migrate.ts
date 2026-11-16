@@ -1,4 +1,6 @@
-import { newId, type AppData, type CardRec, type Note } from '../domain/card'
+import { newId, type AppData, type CardRec, type Deck, type Note } from '../domain/card'
+
+const NOTE_TYPES = new Set(['basic', 'reverse', 'cloze'])
 
 function isObj(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null
@@ -11,7 +13,7 @@ function isV2(v: Record<string, unknown>): boolean {
     Array.isArray(v.notes) &&
     Array.isArray(v.cards) &&
     Array.isArray(v.logs) &&
-    v.notes.every((n) => isObj(n) && typeof n.id === 'string' && typeof n.front === 'string' && typeof n.type === 'string') &&
+    v.notes.every((n) => isObj(n) && typeof n.id === 'string' && typeof n.deckId === 'string' && typeof n.front === 'string' && typeof n.back === 'string' && NOTE_TYPES.has(n.type as string)) &&
     v.cards.every((c) => isObj(c) && typeof c.id === 'string' && typeof c.noteId === 'string' && isObj(c.sched))
   )
 }
@@ -32,7 +34,7 @@ function isV1(v: Record<string, unknown>): boolean {
  */
 export function migrate(raw: unknown): AppData | null {
   if (!isObj(raw)) return null
-  if (isV2(raw)) return raw as unknown as AppData
+  if (isV2(raw)) return normalize(raw as unknown as AppData)
   if (!isV1(raw)) return null
   const notes: Note[] = []
   const cards: CardRec[] = []
@@ -41,5 +43,26 @@ export function migrate(raw: unknown): AppData | null {
     notes.push(note)
     cards.push({ id: String(c.id), noteId: note.id, deckId: note.deckId, ord: 0, createdAt: note.createdAt, sched: c.sched as CardRec['sched'] })
   }
-  return { version: 2, decks: raw.decks as AppData['decks'], notes, cards, logs: raw.logs as AppData['logs'] }
+  return normalize({ version: 2, decks: raw.decks as AppData['decks'], notes, cards, logs: raw.logs as AppData['logs'] })
+}
+
+/**
+ * ノート・カード・デッキの食い違いを直す。
+ * - ノートの無いカードは外す（出しても表示できず、復習が止まるため）
+ * - カードのデッキはノートのデッキにそろえる
+ * - ノートが使っているのに無いデッキは作り直す。カードの無いデッキは外す
+ */
+export function normalize(data: AppData): AppData {
+  const notesById = new Map(data.notes.map((n) => [n.id, n]))
+  const cards = data.cards.filter((c) => notesById.has(c.noteId)).map((c) => {
+    const deckId = notesById.get(c.noteId)!.deckId
+    return c.deckId === deckId ? c : { ...c, deckId }
+  })
+  const withCards = new Set(cards.map((c) => c.noteId))
+  const notes = data.notes.filter((n) => withCards.has(n.id))
+  const used = new Set(notes.map((n) => n.deckId))
+  const decks: Deck[] = data.decks.filter((d) => used.has(d.id))
+  for (const id of used) if (!decks.some((d) => d.id === id)) decks.push({ id, name: `復元したデッキ ${decks.length + 1}` })
+  const same = cards.length === data.cards.length && notes.length === data.notes.length && decks.length === data.decks.length && cards.every((c, i) => c === data.cards[i])
+  return same ? data : { ...data, decks, notes, cards }
 }

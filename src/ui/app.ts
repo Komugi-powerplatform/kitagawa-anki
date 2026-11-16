@@ -78,7 +78,14 @@ export class App {
     private scheduler: Scheduler,
     private now: () => Date = () => new Date(),
   ) {
-    this.data = repo.load()
+    try {
+      this.data = repo.load()
+    } catch (e) {
+      // 保存データが読めないときも、取り込み画面からバックアップで戻せるように空の状態で始める（壊れたデータは repo が別のキーに残す）
+      this.data = { version: 2, decks: [], notes: [], cards: [], logs: [] }
+      this.screen = { name: 'settings' }
+      this.say(`${e instanceof Error ? e.message : String(e)} 読めなかったデータは端末に残してあります。`, 'error')
+    }
   }
 
   start(): void {
@@ -199,13 +206,20 @@ export class App {
   private currentCard(deckId?: string): { card: CardRec; ahead: boolean } | null {
     const now = this.now()
     if (this.forcedCardId) {
-      const forced = this.data.cards.find((c) => c.id === this.forcedCardId && (!deckId || c.deckId === deckId))
+      const forced = this.data.cards.find((c) => c.id === this.forcedCardId && (!deckId || c.deckId === deckId) && this.isActiveNow(c, now))
       if (forced) return { card: forced, ahead: false }
+      this.forcedCardId = null
     }
     const q = buildQueue(this.data, now, this.opts(deckId))
     if (q.length) return { card: q[0], ahead: false }
     const ahead = buildQueue(this.data, new Date(now.getTime() + LEARN_AHEAD_MS), { defaults: { newPerDay: 0, reviewPerDay: 0 }, deckId })
-    return ahead[0] ? { card: ahead[0], ahead: true } : null
+    // 先出しは20分先の時刻で選ぶので、保留・停止は「今」の時刻で確かめ直す
+    const next = ahead.find((c) => this.isActiveNow(c, now))
+    return next ? { card: next, ahead: true } : null
+  }
+
+  private isActiveNow(c: CardRec, now: Date): boolean {
+    return !c.suspended && !(c.buried && new Date(c.buried).getTime() > now.getTime())
   }
 
   private review(deckId?: string): HTMLElement {
@@ -236,7 +250,13 @@ export class App {
 
     const card = current.card
     const note = this.noteOf(card)
-    if (!note) return h('section', {}, header, h('p', { class: 'flash flash-error' }, 'このカードのノートが見つかりません。'))
+    if (!note) {
+      // 通常は起動時の normalize で外れるが、念のため外して先へ進めるようにする
+      return h('section', {}, header, h('div', { class: 'panel confirm' }, h('p', {}, 'このカードのノートが見つかりません。'), h('button', { class: 'danger', onclick: () => {
+        if (this.commit({ ...this.data, cards: this.data.cards.filter((c) => c.id !== card.id) })) this.say('ノートの無いカードを外しました。')
+        this.render()
+      } }, 'このカードを外して次へ')))
+    }
     const r = renderCard(note, card.ord)
     const revealed = this.revealedId === card.id
     const reveal = () => {
@@ -311,10 +331,24 @@ export class App {
   private undo(): void {
     const last = this.undoStack.at(-1)
     if (!last) return
+    if (!last.cards.every((b) => this.data.cards.some((c) => c.id === b.id))) {
+      // 編集や削除でカードが無くなっていたら、記録も含めて何も戻さない
+      this.undoStack = this.undoStack.slice(0, -1)
+      this.say(`${last.label}は取り消せませんでした（カードが編集・削除で無くなっています）。`, 'error')
+      this.render()
+      return
+    }
+    // 戻すのは出題に関わる状態だけ。デッキ・ノート・番号は今のまま（編集のあとに取り消してもノートとずれないように）
     const restore = new Map(last.cards.map((c) => [c.id, c]))
     const saved = this.commit({
       ...this.data,
-      cards: this.data.cards.map((c) => restore.get(c.id) ?? c),
+      cards: this.data.cards.map((c) => {
+        const b = restore.get(c.id)
+        if (!b) return c
+        const { buried, suspended, leech, ...rest } = c
+        void buried, void suspended, void leech
+        return { ...rest, sched: b.sched, ...(b.buried ? { buried: b.buried } : {}), ...(b.suspended ? { suspended: true } : {}), ...(b.leech ? { leech: true } : {}) }
+      }),
       logs: this.data.logs.slice(0, last.logsLen),
     })
     if (saved) {
@@ -562,7 +596,7 @@ export class App {
       window.scrollTo(0, 0)
       return
     }
-    const cards = syncCards(note, this.data.cards, this.scheduler, now)
+    const cards = syncCards(note, this.data.cards, this.scheduler, now, editing?.type)
     const keep = new Set(cards.map((c) => c.id))
     const others = this.data.cards.filter((c) => c.noteId !== note.id)
     const removed = this.data.cards.filter((c) => c.noteId === note.id && !keep.has(c.id)).length
@@ -571,6 +605,7 @@ export class App {
       this.render()
       return
     }
+    this.undoStack = this.undoStack.filter((u) => u.cards.every((c) => this.data.cards.some((x) => x.id === c.id)))
     localStorage.setItem(LAST_DECK_KEY, input.deckName)
     localStorage.setItem(LAST_TYPE_KEY, input.type)
     if (editing) {
@@ -599,7 +634,7 @@ export class App {
         return
       }
       if (this.commit(removeDeck(this.data, deckId))) {
-        this.undoStack = this.undoStack.filter((u) => u.cards.every((c) => c.deckId !== deckId))
+        this.undoStack = this.undoStack.filter((u) => u.cards.every((c) => this.data.cards.some((x) => x.id === c.id)))
         this.say(`「${deck.name}」を削除しました。`)
       }
       this.go({ name: 'home' })
@@ -628,6 +663,7 @@ export class App {
             if (n !== undefined) updated.newPerDay = n
             if (r !== undefined) updated.reviewPerDay = r
             if (this.commit({ ...this.data, decks: this.data.decks.map((d) => (d.id === deckId ? updated : d)) })) {
+              if (localStorage.getItem(LAST_DECK_KEY) === deck.name) localStorage.setItem(LAST_DECK_KEY, newName)
               this.say('デッキの設定を保存しました。')
               this.go({ name: 'home' })
             } else this.render()

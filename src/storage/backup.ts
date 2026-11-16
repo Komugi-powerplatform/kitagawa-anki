@@ -92,5 +92,6 @@ export function removeNote(data: AppData, noteId: string): AppData {
 
 /** デッキと中のノート・カードを消す（回答記録は残す） */
 export function removeDeck(data: AppData, deckId: string): AppData {
-  return { ...data, decks: data.decks.filter((d) => d.id !== deckId), notes: data.notes.filter((n) => n.deckId !== deckId), cards: data.cards.filter((c) => c.deckId !== deckId) }
+  const gone = new Set(data.notes.filter((n) => n.deckId === deckId).map((n) => n.id))
+  return { ...data, decks: data.decks.filter((d) => d.id !== deckId), notes: data.notes.filter((n) => !gone.has(n.id)), cards: data.cards.filter((c) => !gone.has(c.noteId) && c.deckId !== deckId) }
 }

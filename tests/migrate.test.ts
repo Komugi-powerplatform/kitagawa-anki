@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { migrate } from '../src/storage/migrate'
+import { migrate, normalize } from '../src/storage/migrate'
 
 // 第1弾（version 1）で実際に保存していた形
 const v1 = {
@@ -39,5 +39,35 @@ describe('migrate', () => {
     expect(migrate({ version: 3 })).toBeNull()
     expect(migrate({ foo: 1 })).toBeNull()
     expect(migrate(null)).toBeNull()
+  })
+})
+
+describe('normalize（壊れた組み合わせを直す）', () => {
+  const base = () => migrate(structuredClone(v1))!
+  it('ノートの無いカードは外す', () => {
+    const d = base()
+    d.cards.push({ ...d.cards[0], id: 'orphan', noteId: 'missing' })
+    expect(normalize(d).cards.map((c) => c.id)).toEqual(['c1'])
+  })
+  it('カードのデッキはノートのデッキにそろえる', () => {
+    const d = base()
+    d.cards[0] = { ...d.cards[0], deckId: 'gone' }
+    expect(normalize(d).cards[0].deckId).toBe('d1')
+  })
+  it('ノートのデッキが無ければデッキを作り直す', () => {
+    const d = base()
+    d.decks = []
+    const n = normalize(d)
+    expect(n.decks.map((x) => x.id)).toEqual(['d1'])
+  })
+  it('知らない型のノートを含むバックアップは読まない', () => {
+    const d = base() as unknown as { notes: { type: string }[] }
+    d.notes[0].type = 'weird'
+    expect(migrate(d)).toBeNull()
+  })
+  it('migrate は version 2 にも normalize をかける', () => {
+    const d = base()
+    d.cards.push({ ...d.cards[0], id: 'orphan', noteId: 'missing' })
+    expect(migrate(d)!.cards).toHaveLength(1)
   })
 })

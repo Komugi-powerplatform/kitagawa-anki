@@ -36,8 +36,16 @@ export function validateNote(note: Note): string | null {
   if (!note.front.trim()) return note.type === 'cloze' ? '文を入れてください。' : '表を入れてください。'
   if (note.type === 'reverse' && !note.back.trim()) return '逆向きのカードを作るには裏も入れてください。'
   if (note.type === 'cloze') {
-    if (note.front.replace(CLOZE, '').includes('{{c')) return '{{c1::…}} の閉じ忘れがあります（最後に }} が必要です）。'
-    if (clozeNumbers(note.front).length === 0) return '穴にしたい所を {{c1::答え}} の形で囲んでください。'
+    const text = note.front
+    for (const m of text.matchAll(CLOZE)) {
+      const [, , answer] = m
+      // 最短一致のため、入れ子だと内側の }} で切れて答えに {{c が残る
+      if (answer.includes('{{')) return '穴の中に穴（入れ子）は使えません。別々の穴にしてください。'
+      if (!answer.trim()) return '穴の答えが空です（{{c1::答え}} の「答え」を入れてください）。'
+      if (text[m.index + m[0].length] === '}') return '答えの最後が } だと区切りが分かりません。} の後ろに空白を入れるなどしてください。'
+    }
+    if (text.replace(CLOZE, '').includes('{{c')) return '{{c1::…}} の閉じ忘れがあります（最後に }} が必要です）。'
+    if (clozeNumbers(text).length === 0) return '穴にしたい所を {{c1::答え}} の形で囲んでください。'
   }
   return null
 }
@@ -71,8 +79,10 @@ export function renderCard(note: Note, ord: number): Rendered {
  * ノートに合うカードの組を返す。すでにある番号のカードは出題予定を保ったまま残し（デッキはノートに合わせる）、
  * 足りない番号は新規カードを作り、要らなくなった番号のカードは外す。
  */
-export function syncCards(note: Note, existing: CardRec[], scheduler: Scheduler, now: Date): CardRec[] {
-  const byOrd = new Map(existing.filter((c) => c.noteId === note.id).map((c) => [c.ord, c]))
+export function syncCards(note: Note, existing: CardRec[], scheduler: Scheduler, now: Date, prevType?: Note['type']): CardRec[] {
+  // 穴埋めとそれ以外では番号の意味が違う（穴の番号 1 と「裏 → 表」の 1）ので、型をまたいだら前のカードは引き継がない
+  const crossesCloze = prevType !== undefined && prevType !== note.type && (prevType === 'cloze' || note.type === 'cloze')
+  const byOrd = new Map(crossesCloze ? [] : existing.filter((c) => c.noteId === note.id).map((c) => [c.ord, c]))
   return cardOrdsFor(note).map((ord) => {
     const kept = byOrd.get(ord)
     if (kept) return { ...kept, deckId: note.deckId }

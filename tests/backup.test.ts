@@ -107,3 +107,14 @@ describe('MemoryRepo', () => {
     expect(repo.load()).toEqual(data)
   })
 })
+
+describe('removeDeck（敵対検証の指摘）', () => {
+  it('デッキがずれたカードが残っていても、ノートと一緒に消す', async () => {
+    const { r } = await seeded()
+    const en = r.data.decks.find((d) => d.name === 'English')!
+    const card = r.data.cards.find((c) => c.deckId === en.id)!
+    const skewed = { ...r.data, cards: r.data.cards.map((c) => (c.id === card.id ? { ...c, deckId: 'old-deck' } : c)) }
+    const after = removeDeck(skewed, en.id)
+    expect(after.cards.some((c) => c.id === card.id)).toBe(false)
+  })
+})

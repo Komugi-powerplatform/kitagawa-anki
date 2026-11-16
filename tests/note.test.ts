@@ -85,3 +85,37 @@ describe('syncCards', () => {
     expect(after.every((c) => c.deckId === 'd2')).toBe(true)
   })
 })
+
+describe('穴埋めの書き方のチェック（敵対検証の指摘）', () => {
+  it('穴の中に穴（入れ子）はエラー', () => {
+    expect(validateNote(note('cloze', '{{c1::東京 {{c2::日本}} の首都}}'))).toMatch(/入れ子/)
+  })
+  it('答えの直後に } があって区切りが曖昧なものはエラー', () => {
+    expect(validateNote(note('cloze', '{{c1::{x}}}'))).toMatch(/}/)
+  })
+  it('空の答えはエラー', () => {
+    expect(validateNote(note('cloze', '{{c1::}}'))).toMatch(/空/)
+    expect(validateNote(note('cloze', '{{c1::   }}'))).toMatch(/空/)
+  })
+})
+
+describe('syncCards で型を変えたとき', () => {
+  it('穴埋め ⇄ 基本・逆向きを切り替えたら、前のカードの学習記録は引き継がない', async () => {
+    const s = await createScheduler()
+    const cloze = note('cloze', '{{c1::a}}')
+    const [c1] = syncCards(cloze, [], s, NOW)
+    const learned: CardRec = { ...c1, sched: s.review(c1.sched, Rating.Good, NOW).sched }
+    const reverse = { ...cloze, type: 'reverse' as const, front: 'a', back: 'b' }
+    const after = syncCards(reverse, [learned], s, NOW, 'cloze')
+    expect(after.map((c) => c.ord)).toEqual([0, 1])
+    expect(after.every((c) => c.id !== c1.id && c.sched.reps === 0)).toBe(true)
+  })
+  it('基本 → 逆向きなら、表→裏のカードはそのまま残す', async () => {
+    const s = await createScheduler()
+    const basic = note('basic', 'a', 'b')
+    const [c0] = syncCards(basic, [], s, NOW)
+    const after = syncCards({ ...basic, type: 'reverse' }, [c0], s, NOW, 'basic')
+    expect(after[0].id).toBe(c0.id)
+    expect(after).toHaveLength(2)
+  })
+})
